@@ -24,14 +24,17 @@ Scale VMM adapter crate for Jupiter's `jupiter-amm-interface`.
 
 By default, this adapter emits `Swap::TokenSwap`.
 
-You can override per market using `KeyedAccount.params`:
+You can override the Jupiter swap leg per market using `KeyedAccount.params`:
 
 ```json
 {
-  "swap": "gamma",
-  "amm_program_id": "SCALEwAvEK5gtkdHiFzXfPgtk2YwJxPDzaV3aDmR7tA"
+  "swap": "gamma"
 }
 ```
+
+Graduation remains fixed to the Scale AMM program
+`SCALEwAvEK5gtkdHiFzXfPgtk2YwJxPDzaV3aDmR7tA`. The adapter rejects any
+non-Scale `amm_program_id` override.
 
 Supported `swap` overrides:
 

@@ -87,7 +87,6 @@ pub struct ScaleVmm {
     config: ScalePlatformConfig,
     token_program_a: Pubkey,
     token_program_b: Pubkey,
-    amm_program_id: Pubkey,
     swap_leg: ScaleSwapLeg,
     is_ready: bool,
 }
@@ -143,13 +142,13 @@ impl ScaleVmm {
                 self.pair.mint_a.as_ref(),
                 self.pair.mint_b.as_ref(),
             ],
-            &self.amm_program_id,
+            &SCALE_AMM_PROGRAM_ID,
         )
         .0
     }
 
     fn get_amm_vault_address(&self, amm_pool: &Pubkey, mint: &Pubkey) -> Pubkey {
-        Pubkey::find_program_address(&[amm_pool.as_ref(), mint.as_ref()], &self.amm_program_id).0
+        Pubkey::find_program_address(&[amm_pool.as_ref(), mint.as_ref()], &SCALE_AMM_PROGRAM_ID).0
     }
 
     fn get_ata(owner: &Pubkey, mint: &Pubkey, token_program_id: &Pubkey) -> Pubkey {
@@ -167,9 +166,9 @@ impl ScaleVmm {
         Decimal::from(fee_amount) / Decimal::from(base_amount)
     }
 
-    fn parse_amm_program_id(params: Option<&serde_json::Value>) -> Result<Pubkey> {
+    fn ensure_scale_amm_program_id(params: Option<&serde_json::Value>) -> Result<()> {
         let Some(params) = params else {
-            return Ok(SCALE_AMM_PROGRAM_ID);
+            return Ok(());
         };
 
         let maybe_program_id = params
@@ -178,12 +177,20 @@ impl ScaleVmm {
             .and_then(serde_json::Value::as_str);
 
         let Some(program_id_str) = maybe_program_id else {
-            return Ok(SCALE_AMM_PROGRAM_ID);
+            return Ok(());
         };
 
-        program_id_str
+        let program_id = program_id_str
             .parse::<Pubkey>()
-            .map_err(|_| anyhow!("Invalid amm_program_id in params: {program_id_str}"))
+            .map_err(|_| anyhow!("Invalid amm_program_id in params: {program_id_str}"))?;
+
+        if program_id != SCALE_AMM_PROGRAM_ID {
+            return Err(anyhow!(
+                "Scale VMM graduation only supports Scale AMM program {SCALE_AMM_PROGRAM_ID}",
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -206,7 +213,7 @@ impl Amm for ScaleVmm {
 
         let pair = decode_pair_account(&keyed_account.account.data)?;
         let swap_leg = ScaleSwapLeg::from_params(keyed_account.params.as_ref())?;
-        let amm_program_id = Self::parse_amm_program_id(keyed_account.params.as_ref())?;
+        Self::ensure_scale_amm_program_id(keyed_account.params.as_ref())?;
 
         Ok(Self {
             key: keyed_account.key,
@@ -215,7 +222,6 @@ impl Amm for ScaleVmm {
             config: ScalePlatformConfig::default(),
             token_program_a: SPL_TOKEN_PROGRAM_ID,
             token_program_b: SPL_TOKEN_PROGRAM_ID,
-            amm_program_id,
             swap_leg,
             is_ready: false,
         })
@@ -362,7 +368,7 @@ impl Amm for ScaleVmm {
         let amm_pool = self.get_amm_pool_address();
         let amm_vault_a = self.get_amm_vault_address(&amm_pool, &self.pair.mint_a);
         let amm_vault_b = self.get_amm_vault_address(&amm_pool, &self.pair.mint_b);
-        let amm_config = Self::get_config_address(&self.amm_program_id);
+        let amm_config = Self::get_config_address(&SCALE_AMM_PROGRAM_ID);
 
         let mut account_metas = Vec::with_capacity(self.get_accounts_len());
         account_metas.push(AccountMeta::new_readonly(SCALE_VMM_PROGRAM_ID, false));
@@ -379,7 +385,7 @@ impl Amm for ScaleVmm {
         account_metas.push(AccountMeta::new_readonly(self.token_program_b, false));
         account_metas.push(AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false));
         account_metas.push(AccountMeta::new_readonly(self.config_address, false));
-        account_metas.push(AccountMeta::new_readonly(self.amm_program_id, false));
+        account_metas.push(AccountMeta::new_readonly(SCALE_AMM_PROGRAM_ID, false));
         account_metas.push(AccountMeta::new(amm_pool, false));
         account_metas.push(AccountMeta::new(amm_vault_a, false));
         account_metas.push(AccountMeta::new(amm_vault_b, false));
@@ -727,10 +733,9 @@ mod tests {
     }
 
     #[test]
-    fn supports_params_override_for_swap_leg_and_amm_program() {
+    fn supports_params_override_for_swap_leg() {
         let pair_key = Pubkey::new_unique();
         let pair = sample_pair(CurveType::ConstantProduct);
-        let custom_amm_program = Pubkey::new_unique();
 
         let keyed = KeyedAccount {
             key: pair_key,
@@ -739,13 +744,32 @@ mod tests {
                 encode_anchor_account("PairState", &pair),
             ),
             params: Some(serde_json::json!({
-                "swap": "gamma",
-                "amm_program_id": custom_amm_program.to_string()
+                "swap": "gamma"
             })),
         };
 
         let amm = ScaleVmm::from_keyed_account(&keyed, &AmmContext::default()).unwrap();
         assert_eq!(amm.swap_leg, ScaleSwapLeg::Gamma);
-        assert_eq!(amm.amm_program_id, custom_amm_program);
+    }
+
+    #[test]
+    fn rejects_non_scale_amm_program_override() {
+        let pair_key = Pubkey::new_unique();
+        let pair = sample_pair(CurveType::ConstantProduct);
+        let keyed = KeyedAccount {
+            key: pair_key,
+            account: new_account(
+                super::SCALE_VMM_PROGRAM_ID,
+                encode_anchor_account("PairState", &pair),
+            ),
+            params: Some(serde_json::json!({
+                "amm_program_id": Pubkey::new_unique().to_string()
+            })),
+        };
+
+        let err = ScaleVmm::from_keyed_account(&keyed, &AmmContext::default()).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Scale VMM graduation only supports Scale AMM program"));
     }
 }
